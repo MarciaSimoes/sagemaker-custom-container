@@ -1,0 +1,133 @@
+from distutils import text_file
+import spacy
+import json
+import os
+import flask
+import pandas as pd
+import io
+
+
+prefix = "/opt/ml/model/models/"
+models = ['model_brand', 'model_color', 'model_gender', 'model_category']
+
+
+class ScoringService(object):
+
+    model = None  # Where we keep the model when it's loaded
+
+    # função pega lista modelos
+    @classmethod
+    def get_list_models():
+        model_dir = prefix
+        list_of_models = [spacy.load(
+            (os.path.join(model_dir, mp))) for mp in models]
+        return list_of_models
+
+    # função transforma os dados no formato spacy
+    @classmethod
+    def get_list_category(doc):
+        ent_array = []
+        dc = {}
+        for ent in doc.ents:
+            new_int = [ent.label_, ent.text]
+            if new_int not in ent_array:
+                ent_array.append(ent.text)
+                dc = {ent.label_: ent_array}  # colocar entre chave {
+        return dc
+
+    @classmethod
+    def model_fn(model_dir):
+        print("entrei no model_dir", model_dir)
+        model_dir = '/opt/ml/model/models/'
+        clf = [spacy.load((os.path.join(model_dir, mp))) for mp in models]
+        # clf.to_csv('/opt/ml/model/models/')
+        return clf
+
+    @classmethod
+    def predict(self, clf, input):
+
+        list_agg = []
+        list_of_models = clf
+
+        # get list of model
+        #list_of_models = [spacy.load((os.path.join(prefix, mp))) for mp in models]
+        if len(list_of_models) > 0:
+            # tranform text in doc, format to spacy - junta resultados dos 4 modelos
+            for model in list_of_models:
+                doc = model(input)
+                list_per_cat = self.get_list_category(doc)
+                list_agg.append(list_per_cat)
+
+            # dicionario para modelo para quando não tiver dados sempre vir padronizado
+            results = dict.fromkeys(
+                ["text_query", "brand", "color", "gender", "category"])
+
+            # transformar a lista agg em formato json
+            for i in range(len(list_agg)):
+                results["text_query"] = input
+                if "brand".upper() in list_agg[i]:
+                    results["brand"] = list_agg[i]["BRAND"]
+                elif "color".upper() in list_agg[i]:
+                    results["color"] = list_agg[i]["COLOR"]
+                elif "gender".upper() in list_agg[i]:
+                    results["gender"] = list_agg[i]["GENDER"]
+                elif "category".upper() in list_agg[i]:
+                    results["category"] = list_agg[i]["CATEGORY"]
+                results_json = json.dumps(results)
+
+        # dicionario para modelo para quando não tiver dados sempre vir padronizado
+        results = dict.fromkeys(
+            ["text_query", "brand", "color", "gender", "category"])
+
+        return results_json
+
+
+# The flask app for serving predictions
+app = flask.Flask(__name__)
+
+
+@app.route("/ping", methods=["GET"])
+def ping():
+    """Determine if the container is working and healthy. In this sample container, we declare
+    it healthy if we can load the model successfully."""
+    # se a lista retornar modelos
+    if len(ScoringService.get_list_models()) != 0:
+        # You can insert a health check here
+        health = len(ScoringService.get_list_models())
+    else:
+        health = None
+
+    status = 200 if health else 404
+    return flask.Response(response="\n", status=status, mimetype="application/json")
+
+
+@app.route("/invocations", methods=["POST"])
+def transformation():
+    """Do an inference on a single batch of data. In this sample server, we take data as CSV, convert
+    it to a pandas data frame for internal use and then convert the predictions back to CSV (which really
+    just means one prediction per line, since there's a single column.
+    """
+    data = None
+
+    # Convert from CSV to pandas
+    if flask.request.content_type == "text/csv":
+        data = flask.request.data.decode("utf-8")
+        s = io.StringIO(data)
+        data = pd.read_csv(s)
+    # Convert from JSON to pandas
+    elif flask.request.content_type == "application/json":
+        data = flask.request.get_json()
+        data = pd.json_normalize(data)
+    else:
+        return flask.Response(
+            response=f"{flask.request.content_type} is not supported", status=415, mimetype="text/plain"
+        )
+
+    print("Invoked with {} records".format(data.shape[0]))
+
+    # Do the prediction
+    predictions = ScoringService.predict(data)
+    json_output = predictions[[
+        "text_query", "brand", "color", "gender", "category"]].to_json(orient='records')
+
+    return json_output
